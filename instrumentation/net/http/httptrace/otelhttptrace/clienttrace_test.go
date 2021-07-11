@@ -89,15 +89,20 @@ func TestHTTPRequestWithClientTrace(t *testing.T) {
 		{
 			name: "http.connect",
 			attributes: map[attribute.Key]attribute.Value{
-				attribute.Key("http.remote"): attribute.StringValue(address.String()),
+				attribute.Key("http.conn.done.addr"):     attribute.StringValue(address.String()),
+				attribute.Key("http.conn.done.network"):  attribute.StringValue("tcp"),
+				attribute.Key("http.conn.start.network"): attribute.StringValue("tcp"),
+				attribute.Key("http.remote"):             attribute.StringValue(address.String()),
 			},
 			parent: "http.getconn",
 		},
 		{
 			name: "http.getconn",
 			attributes: map[attribute.Key]attribute.Value{
-				attribute.Key("http.remote"): attribute.StringValue(address.String()),
-				attribute.Key("http.host"):   attribute.StringValue(address.String()),
+				attribute.Key("http.remote"):       attribute.StringValue(address.String()),
+				attribute.Key("http.host"):         attribute.StringValue(address.String()),
+				attribute.Key("http.conn.reused"):  attribute.BoolValue(false),
+				attribute.Key("http.conn.wasidle"): attribute.BoolValue(false),
 			},
 			parent: "test",
 		},
@@ -205,7 +210,13 @@ func TestConcurrentConnectionStart(t *testing.T) {
 
 	expectedRemotes := []attribute.KeyValue{
 		attribute.String("http.remote", "127.0.0.1:3000"),
+		attribute.String("http.conn.start.network", "tcp"),
+		attribute.String("http.conn.done.addr", "127.0.0.1:3000"),
+		attribute.String("http.conn.done.network", "tcp"),
 		attribute.String("http.remote", "[::1]:3000"),
+		attribute.String("http.conn.start.network", "tcp"),
+		attribute.String("http.conn.done.addr", "[::1]:3000"),
+		attribute.String("http.conn.done.network", "tcp"),
 	}
 	for _, tt := range tts {
 		t.Run(tt.name, func(t *testing.T) {
@@ -275,4 +286,96 @@ func TestHTTPRequestWithTraceContext(t *testing.T) {
 
 	require.Equal(t, parent.SpanContext().TraceID(), getconn.SpanContext().TraceID())
 	require.Equal(t, parent.SpanContext().SpanID(), getconn.ParentSpanID())
+}
+
+func TestWithoutSubSpans(t *testing.T) {
+	sr := &oteltest.SpanRecorder{}
+	otel.SetTracerProvider(
+		oteltest.NewTracerProvider(oteltest.WithSpanRecorder(sr)),
+	)
+
+	// Mock http server
+	ts := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		}),
+	)
+	defer ts.Close()
+	address := ts.Listener.Addr().String()
+
+	ctx := context.Background()
+	ctx = httptrace.WithClientTrace(ctx,
+		otelhttptrace.NewClientTrace(ctx,
+			otelhttptrace.WithoutSubSpans(),
+		),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	// no spans created because we were just using background context without span
+	require.Len(t, sr.Completed(), 0)
+
+	// Start again with a "real" span in the context, now tracing should add
+	// events and annotations.
+	ctx, span := otel.Tracer("oteltest").Start(context.Background(), "root")
+	ctx = httptrace.WithClientTrace(ctx,
+		otelhttptrace.NewClientTrace(ctx,
+			otelhttptrace.WithoutSubSpans(),
+		),
+	)
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
+	req.Header.Set("User-Agent", "oteltest/1.1")
+	require.NoError(t, err)
+	resp, err = ts.Client().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	span.End()
+	// we just have the one span we created
+	require.Len(t, sr.Completed(), 1)
+	recSpan := sr.Completed()[0]
+	expectedEventNames := []string{
+		"http.getconn.start",
+		"http.getconn.done",
+		"http.send.start",
+		"http.send.done",
+		"http.receive.start",
+		"http.receive.done",
+	}
+	gotEventNames := []string{}
+	for _, e := range recSpan.Events() {
+		gotEventNames = append(gotEventNames, e.Name)
+	}
+	assert.Equal(t, expectedEventNames, gotEventNames)
+
+	gotAttributes := recSpan.Attributes()
+	require.Len(t, gotAttributes, 8)
+	assert.Equal(t,
+		attribute.StringValue("gzip"),
+		gotAttributes[attribute.Key("http.accept-encoding")],
+	)
+	assert.Equal(t,
+		attribute.StringValue("oteltest/1.1"),
+		gotAttributes[attribute.Key("http.user-agent")],
+	)
+	// value is dynamic, just verify we have the attribute
+	assert.Contains(t, gotAttributes, attribute.Key("http.conn.idletime"))
+	assert.Equal(t,
+		attribute.BoolValue(true),
+		gotAttributes[attribute.Key("http.conn.reused")],
+	)
+	assert.Equal(t,
+		attribute.BoolValue(true),
+		gotAttributes[attribute.Key("http.conn.wasidle")],
+	)
+	assert.Equal(t,
+		attribute.StringValue(address),
+		gotAttributes[attribute.Key("http.host")],
+	)
+	assert.Equal(t,
+		attribute.StringValue(address),
+		gotAttributes[attribute.Key("http.remote")],
+	)
+	// value is dynamic, just verify we have the attribute
+	assert.Contains(t, gotAttributes, attribute.Key("http.local"))
 }
