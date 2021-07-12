@@ -326,6 +326,7 @@ func TestWithoutSubSpans(t *testing.T) {
 	)
 	req, err = http.NewRequestWithContext(ctx, http.MethodGet, ts.URL, nil)
 	req.Header.Set("User-Agent", "oteltest/1.1")
+	req.Header.Set("Authorization", "Bearer token123")
 	require.NoError(t, err)
 	resp, err = ts.Client().Do(req)
 	require.NoError(t, err)
@@ -336,7 +337,7 @@ func TestWithoutSubSpans(t *testing.T) {
 	recSpan := sr.Completed()[0]
 
 	gotAttributes := recSpan.Attributes()
-	require.Len(t, gotAttributes, 3)
+	require.Len(t, gotAttributes, 4)
 	assert.Equal(t,
 		attribute.StringValue("gzip"),
 		gotAttributes[attribute.Key("http.accept-encoding")],
@@ -344,6 +345,11 @@ func TestWithoutSubSpans(t *testing.T) {
 	assert.Equal(t,
 		attribute.StringValue("oteltest/1.1"),
 		gotAttributes[attribute.Key("http.user-agent")],
+	)
+	// verify redacted auth headers
+	assert.Equal(t,
+		attribute.StringValue("****"),
+		gotAttributes[attribute.Key("http.authorization")],
 	)
 	assert.Equal(t,
 		attribute.StringValue(address),

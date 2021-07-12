@@ -16,7 +16,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Changed
 
-- Added `WithoutSubSpans` option to `NewClientTrace` in the `instrumentation/net/http/httptrace/otelhttptrace` package (#879)
+- Added `WithoutSubSpans`, `WithRedactedHeaders`, and `WithoutHeaders` options to `NewClientTrace` in the `instrumentation/net/http/httptrace/otelhttptrace` package (#879)
 
 ## [0.21.0] - 2021-06-18
 
